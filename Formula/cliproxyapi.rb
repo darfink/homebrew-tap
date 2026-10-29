@@ -13,21 +13,24 @@ class Cliproxyapi < Formula
 
   depends_on "go" => :build
 
-  # The regression tests use local HTTP servers, including signed OAuth retries.
-  allow_network_access! :build
+  deny_network_access! [:build, :test]
 
   def fetch
+    ENV["CGO_ENABLED"] = "1"
     system "go", "mod", "download"
+    ENV["GOPROXY"] = "off"
+    ENV["GOSUMDB"] = "off"
+
+    # Homebrew's offline install phase blocks even loopback sockets. Run the mock
+    # HTTP tests here, on the patched source, before the new keg can be installed.
+    system "go", "test", "-tags", "debug", "./internal/runtime/executor",
+           "./internal/runtime/executor/helps", "-run", "Claude", "-count=1"
   end
 
   def install
     ENV["CGO_ENABLED"] = "1" # Keep native shared-library plugins available.
     ENV["GOPROXY"] = "off"
     ENV["GOSUMDB"] = "off"
-
-    # This gate runs during installation, before the new keg can replace the old one.
-    system "go", "test", "-tags", "debug", "./internal/runtime/executor",
-           "./internal/runtime/executor/helps", "-run", "Claude", "-count=1"
 
     ldflags = %W[
       -X main.Version=#{version}-search-recovery
