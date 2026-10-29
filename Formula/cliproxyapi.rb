@@ -1,7 +1,10 @@
+require "digest"
+
 class Cliproxyapi < Formula
   desc "CLIProxyAPI main with Claude encrypted-search replay recovery"
   homepage "https://github.com/router-for-me/CLIProxyAPI"
   license "MIT"
+  revision 1
 
   head do
     url "https://github.com/router-for-me/CLIProxyAPI.git", branch: "main"
@@ -32,8 +35,9 @@ class Cliproxyapi < Formula
     ENV["GOPROXY"] = "off"
     ENV["GOSUMDB"] = "off"
 
+    patch_sha = Digest::SHA256.hexdigest(head.patches.first.contents)[0, 12]
     ldflags = %W[
-      -X main.Version=#{version}-search-recovery
+      -X main.Version=#{pkg_version}-search-recovery.#{patch_sha}
       -X main.Commit=#{version.commit}
       -X main.BuildDate=#{time.iso8601}
       -X main.DefaultConfigPath=#{etc/"cliproxyapi.conf"}

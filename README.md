@@ -37,14 +37,18 @@ brew reinstall --HEAD darfink/tap/cliproxyapi && brew services restart darfink/t
 
 The patch handles specific HTTP 400 errors for rejected encrypted search results and citation indexes.
 It retries before output starts, with the same credential, and permits at most three recoveries per request.
-Only the rejected search artifacts become readable historical references.
+An exact error location identifies the search turn to recover.
+If the error index differs from the submitted history, recovery converts incomplete citation history into readable references together.
+Complete native searches remain unchanged during this fallback.
 Successful requests and saved transcripts remain unchanged.
 
 Related work: [CLIProxyAPI PR #6447](https://github.com/router-for-me/CLIProxyAPI/pull/6447).
-This patch also covers citation-only history and message indexes that differ from the submitted history.
+The fallback uses unique artifact identities and refuses ambiguous identities during request rebuilds.
 The tests cover streaming, non-streaming, payload rules, request signatures, ambiguous history, and repeated errors.
+They also cover a newer complete search with the same block layout as an older incomplete search.
 
 The formula builds with the `debug` tag and CGO for native plugins.
+The version includes a fingerprint of the recovery patch.
 The regression tests use mock HTTP servers and require no provider credentials.
 The optional captured-log test skips without `CLIPROXY_SEARCH_REPLAY_LOG`.
 This repository contains no captured conversations or credentials.

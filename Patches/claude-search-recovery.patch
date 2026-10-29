@@ -50,10 +50,10 @@ index dc6b2fd3..d3c645d4 100644
  		}
 diff --git a/internal/runtime/executor/claude_search_captured_recovery_test.go b/internal/runtime/executor/claude_search_captured_recovery_test.go
 new file mode 100644
-index 00000000..1edd08a4
+index 00000000..c6b2c198
 --- /dev/null
 +++ b/internal/runtime/executor/claude_search_captured_recovery_test.go
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,160 @@
 +package executor
 +
 +import (
@@ -115,14 +115,26 @@ index 00000000..1edd08a4
 +	type target struct{ message, block int }
 +	var targets []target
 +	for i, message := range gjson.GetBytes(captured, "messages").Array() {
++		complete := false
++		for _, part := range message.Get("content").Array() {
++			if part.Get("type").String() == "web_search_tool_result" {
++				for _, result := range part.Get("content").Array() {
++					complete = complete || result.Get("encrypted_content").String() != ""
++				}
++			}
++		}
++		if complete {
++			continue
++		}
 +		for j, part := range message.Get("content").Array() {
 +			if part.Get("type").String() == "text" && part.Get("citations.0.encrypted_index").String() != "" {
 +				targets = append(targets, target{i, j})
++				break
 +			}
 +		}
 +	}
-+	if len(targets) == 0 || len(targets) > 3 || targets[0].block != block || citation != 0 {
-+		t.Fatal("capture needs one to three search turns with the first indexed citation rejected")
++	if len(targets) == 0 || targets[0].block != block || citation != 0 {
++		t.Fatal("capture needs orphaned citation history with the first indexed citation rejected")
 +	}
 +	offset := targets[0].message - reported
 +	for _, stream := range []bool{false, true} {
@@ -141,22 +153,26 @@ index 00000000..1edd08a4
 +				}
 +				for i, message := range messages {
 +					changed := false
-+					for j := 0; j < attempts && j < len(targets); j++ {
-+						changed = changed || i == targets[j].message
++					for _, target := range targets {
++						changed = changed || (attempts > 0 && i == target.message)
 +					}
 +					if !changed && message.Raw != originalMessages[i].Raw {
 +						t.Errorf("modified unrelated message %d", i)
 +					}
 +				}
++				pending := -1
 +				for i, target := range targets {
 +					hasCitation := messages[target.message].Get(fmt.Sprintf("content.%d.citations.0.encrypted_index", target.block)).Exists()
-+					if hasCitation != (i >= attempts) {
-+						t.Errorf("incorrect recovery sequence at target %d attempt %d", i, attempts+1)
++					if hasCitation != (attempts == 0) {
++						t.Errorf("incorrect batch recovery at target %d attempt %d", i, attempts+1)
++					}
++					if hasCitation && pending < 0 {
++						pending = i
 +					}
 +				}
 +				attempts++
-+				if attempts <= len(targets) {
-+					target := targets[attempts-1]
++				if pending >= 0 {
++					target := targets[pending]
 +					w.WriteHeader(http.StatusBadRequest)
 +					_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"type": "invalid_request_error", "message": fmt.Sprintf("messages.%d.content.%d.citations.0: Invalid `encrypted_index` in `text` block", target.message-offset, target.block)}})
 +					return
@@ -191,7 +207,7 @@ index 00000000..1edd08a4
 +			} else if _, err := executor.Execute(context.Background(), auth, req, opts); err != nil {
 +				t.Fatal(err)
 +			}
-+			if attempts != len(targets)+1 || !bytes.Equal(payload, before) {
++			if attempts != 2 || !bytes.Equal(payload, before) {
 +				t.Fatal("incorrect attempt count or mutated caller history")
 +			}
 +			t.Logf("full capture: messages=%d recovered_turns=%d attempts=%d; other message bytes unchanged", len(originalMessages), len(targets), attempts)
@@ -200,10 +216,10 @@ index 00000000..1edd08a4
 +}
 diff --git a/internal/runtime/executor/claude_search_normalized_recovery_test.go b/internal/runtime/executor/claude_search_normalized_recovery_test.go
 new file mode 100644
-index 00000000..cfe70242
+index 00000000..771c4a24
 --- /dev/null
 +++ b/internal/runtime/executor/claude_search_normalized_recovery_test.go
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,138 @@
 +package executor
 +
 +import (
@@ -219,6 +235,7 @@ index 00000000..cfe70242
 +	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 +	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 +	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
++	"github.com/tidwall/gjson"
 +)
 +
 +func nativeClaudeNormalizedRecoveryPayload(t *testing.T) []byte {
@@ -236,6 +253,9 @@ index 00000000..cfe70242
 +	// thinking signatures that the normal preparation pipeline must discard.
 +	messages[205] = json.RawMessage(`{"role":"assistant","content":[{"type":"text","text":"first preserved context"},{"type":"server_tool_use","id":"srvtoolu_first","name":"web_search","input":{"query":"first query"}},{"type":"web_search_tool_result","tool_use_id":"srvtoolu_first","content":[]},{"type":"text","text":"second preserved context"},{"type":"text","text":"First answer cites a source","citations":[{"type":"web_search_result_location","encrypted_index":"opaque-first-index","url":"https://source.example/first","title":"First source","cited_text":"First readable excerpt"}]}]}`)
 +	messages[219] = json.RawMessage(`{"role":"assistant","content":[{"type":"server_tool_use","id":"srvtoolu_second","name":"web_search","input":{"query":"second query"}},{"type":"web_search_tool_result","tool_use_id":"srvtoolu_second","content":[]},{"type":"text","text":"third preserved context"},{"type":"text","text":"Second answer cites a source","citations":[{"type":"web_search_result_location","encrypted_index":"opaque-second-index","url":"https://source.example/second","title":"Second source","cited_text":"Second readable excerpt"}]}]}`)
++	// A newer complete search deliberately repeats the first orphan's layout.
++	// Selecting a rejected turn by block shape alone becomes ambiguous here.
++	messages[223] = json.RawMessage(`{"role":"assistant","content":[{"type":"text","text":"recent preserved context"},{"type":"server_tool_use","id":"srvtoolu_complete","name":"web_search","input":{"query":"recent query"}},{"type":"web_search_tool_result","tool_use_id":"srvtoolu_complete","content":[{"type":"web_search_result","url":"https://source.example/recent","encrypted_content":"keep-native-result"}]},{"type":"text","text":"recent second context"},{"type":"text","text":"Recent cited answer","citations":[{"type":"web_search_result_location","encrypted_index":"keep-native-citation","url":"https://source.example/recent"}]}]}`)
 +	payload, err := json.Marshal(map[string]any{"model": "claude-opus-5-5", "max_tokens": 256, "thinking": map[string]any{"type": "adaptive"}, "system": "caller-system-preserve-me", "messages": messages})
 +	if err != nil {
 +		t.Fatal(err)
@@ -256,12 +276,13 @@ index 00000000..cfe70242
 +					return
 +				}
 +				captured = append(captured, body)
-+				attempt := len(captured)
-+				if attempt < 3 {
++				firstPending := strings.Contains(string(body), "opaque-first-index")
++				secondPending := strings.Contains(string(body), "opaque-second-index")
++				if firstPending || secondPending {
 +					w.Header().Set("Content-Type", "application/json")
 +					w.WriteHeader(http.StatusBadRequest)
 +					path := "messages.29.content.4"
-+					if attempt == 2 {
++					if !firstPending {
 +						path = "messages.43.content.3"
 +					}
 +					_, _ = fmt.Fprintf(w, `{"type":"error","error":{"type":"invalid_request_error","message":"%s.citations.0: Invalid `+"`encrypted_index`"+` in `+"`text`"+` block"}}`, path)
@@ -299,15 +320,19 @@ index 00000000..cfe70242
 +				}
 +				output = response.Payload
 +			}
-+			if len(captured) != 3 || !strings.Contains(string(output), "Continued") {
++			if len(captured) != 2 || !strings.Contains(string(output), "Continued") {
 +				t.Fatalf("attempts=%d output=%s", len(captured), output)
 +			}
 +			if string(req.Payload) != string(payload) || string(opts.OriginalRequest) != string(payload) {
 +				t.Fatal("mutated caller-owned payload")
 +			}
 +			assertRejectedCitationRecoveryRequest(t, captured[0], true, true)
-+			assertRejectedCitationRecoveryRequest(t, captured[1], false, true)
-+			assertRejectedCitationRecoveryRequest(t, captured[2], false, false)
++			assertRejectedCitationRecoveryRequest(t, captured[1], false, false)
++			for i, message := range gjson.GetBytes(captured[0], "messages").Array() {
++				if i != 205 && i != 219 && message.Raw != gjson.GetBytes(captured[1], fmt.Sprintf("messages.%d", i)).Raw {
++					t.Errorf("changed unrelated message %d, including complete search history", i)
++				}
++			}
 +		})
 +	}
 +}
@@ -675,10 +700,10 @@ index 00000000..90a1d3dd
 +}
 diff --git a/internal/runtime/executor/helps/claude_search_citation_recovery_test.go b/internal/runtime/executor/helps/claude_search_citation_recovery_test.go
 new file mode 100644
-index 00000000..d9458721
+index 00000000..24020974
 --- /dev/null
 +++ b/internal/runtime/executor/helps/claude_search_citation_recovery_test.go
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,147 @@
 +package helps
 +
 +import (
@@ -780,16 +805,14 @@ index 00000000..d9458721
 +	if replayed := ApplyClaudeSearchRecovery(ctx, body); !bytes.Equal(replayed, recovered) {
 +		t.Fatal("retry did not apply the same recovery to rebuilt history")
 +	}
-+	fullyRecovered, changed := RecoverClaudeSearchHistory(recovered, second)
-+	if !changed {
-+		t.Fatal("second rejected search did not recover")
++	if _, changed := RecoverClaudeSearchHistory(recovered, second); changed {
++		t.Fatal("orphaned history was not repaired together on the first recovery")
 +	}
-+	ctx = WithClaudeSearchRecovery(ctx, second, recovered)
-+	if replayed := ApplyClaudeSearchRecovery(ctx, body); !bytes.Equal(replayed, fullyRecovered) {
-+		t.Fatal("second retry lost the first recovery")
++	if strings.Contains(string(recovered), "first-index") || strings.Contains(string(recovered), "second-index") {
++		t.Fatal("batch recovery retained an orphaned citation")
 +	}
 +	for i, original := range messages {
-+		if i != 205 && i != 219 && gjson.GetBytes(fullyRecovered, "messages."+strconv.Itoa(i)).Raw != string(original) {
++		if i != 205 && i != 219 && gjson.GetBytes(recovered, "messages."+strconv.Itoa(i)).Raw != string(original) {
 +			t.Fatalf("changed unrelated message %d", i)
 +		}
 +	}
@@ -828,12 +851,130 @@ index 00000000..d9458721
 +		t.Fatal("did not recover uniquely identifiable encrypted search history")
 +	}
 +}
+diff --git a/internal/runtime/executor/helps/claude_search_orphaned_recovery_test.go b/internal/runtime/executor/helps/claude_search_orphaned_recovery_test.go
+new file mode 100644
+index 00000000..eea29b3e
+--- /dev/null
++++ b/internal/runtime/executor/helps/claude_search_orphaned_recovery_test.go
+@@ -0,0 +1,112 @@
++package helps
++
++import (
++	"bytes"
++	"context"
++	"strings"
++	"testing"
++
++	"github.com/tidwall/gjson"
++	"github.com/tidwall/sjson"
++)
++
++// The three assistant turns deliberately share citation and text-block layouts.
++// Only the third has a native result, so batch fallback must leave it intact.
++const orphanedRecoveryFixture = `{"model":"claude-opus-5-5","messages":[
++{"role":"assistant","content":[{"type":"thinking","thinking":"keep thought","signature":"sig"},{"type":"text","text":"first answer","citations":[{"type":"web_search_result_location","encrypted_index":"opaque-one","url":"https://one.example","title":"One","cited_text":"one excerpt"},{"type":"char_location","document_index":0,"start_char_index":0,"end_char_index":2}]},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1hZ2U="}},{"type":"tool_use","id":"ordinary","name":"lookup","input":{}}]},
++{"role":"assistant","content":[{"type":"thinking","thinking":"keep thought two","signature":"sig2"},{"type":"text","text":"second answer","citations":[{"type":"char_location","document_index":1,"start_char_index":1,"end_char_index":4}]},{"type":"text","text":"second source","citations":[{"type":"web_search_result_location","encrypted_index":"opaque-two","url":"https://two.example","title":"Two","cited_text":"two excerpt"}]}]},
++{"role":"assistant","content":[{"type":"thinking","thinking":"native thought","signature":"native-sig"},{"type":"text","text":"native answer","citations":[{"type":"web_search_result_location","encrypted_index":"opaque-native","url":"https://native.example","title":"Native","cited_text":"native excerpt"},{"type":"char_location","document_index":0,"start_char_index":0,"end_char_index":2}]},{"type":"server_tool_use","id":"srv-native","name":"web_search","input":{"query":"native query"}},{"type":"web_search_tool_result","tool_use_id":"srv-native","content":[{"url":"https://native.example","title":"Native","encrypted_content":"keep encrypted bytes"}]}]}
++]}`
++
++func TestOrphanedClaudeSearchBatchFallbackAndPreservation(t *testing.T) {
++	body := []byte(orphanedRecoveryFixture)
++	// The message index differs from the submitted history, and both an orphan
++	// and a complete native search have a text block at the reported position.
++	failure := citationRecoveryFailure("messages.99.content.1.citations.0: Invalid `encrypted_index` in `text` block")
++	recovered, changed := RecoverClaudeSearchHistory(body, failure)
++	if !changed {
++		t.Fatal("expected unrelated numeric path to trigger orphaned citation batch recovery")
++	}
++	if strings.Contains(string(recovered), "opaque-one") || strings.Contains(string(recovered), "opaque-two") {
++		t.Fatal("batch retained orphaned encrypted citations")
++	}
++	for _, path := range []string{"messages.0.content.1.text", "messages.2"} {
++		if !gjson.GetBytes(recovered, path).Exists() {
++			t.Fatalf("lost expected content at %s", path)
++		}
++	}
++	for _, want := range []string{"https://one.example", "one excerpt", "https://two.example", "two excerpt", "first answer", "second answer"} {
++		if !strings.Contains(string(recovered), want) {
++			t.Errorf("recovery lost readable reference/content %q", want)
++		}
++	}
++	for _, path := range []string{"messages.0.content.0.thinking", "messages.0.content.2.source", "messages.0.content.3", "messages.1.content.0.thinking", "messages.1.content.1.citations.0"} {
++		if gjson.GetBytes(recovered, path).Raw != gjson.GetBytes(body, path).Raw {
++			t.Errorf("changed unrelated content %s", path)
++		}
++	}
++	if gjson.GetBytes(recovered, "messages.2").Raw != gjson.GetBytes(body, "messages.2").Raw {
++		t.Fatal("complete native search turn was not preserved byte-for-byte")
++	}
++	if gjson.GetBytes(recovered, "messages.0.content.1.citations.0.type").String() != "char_location" {
++		t.Fatal("did not preserve non-search citation")
++	}
++}
++
++func TestOrphanedClaudeSearchExactLocationTargetsOnlyItsTurn(t *testing.T) {
++	body := []byte(orphanedRecoveryFixture)
++	failure := citationRecoveryFailure("messages.1.content.2.citations.0: Invalid `encrypted_index` in `text` block")
++	recovered, changed := RecoverClaudeSearchHistory(body, failure)
++	if !changed {
++		t.Fatal("expected exact citation location to recover")
++	}
++	if gjson.GetBytes(body, "messages.0").Raw != gjson.GetBytes(recovered, "messages.0").Raw {
++		t.Fatal("exact path recovery changed the other orphaned turn")
++	}
++	if gjson.GetBytes(body, "messages.2").Raw != gjson.GetBytes(recovered, "messages.2").Raw {
++		t.Fatal("exact path recovery changed complete native turn")
++	}
++	if strings.Contains(gjson.GetBytes(recovered, "messages.1").Raw, "opaque-two") {
++		t.Fatal("target turn retained opaque citation token")
++	}
++}
++
++func TestOrphanedClaudeSearchRecoveryRebuildTracksShiftedArtifact(t *testing.T) {
++	body := []byte(orphanedRecoveryFixture)
++	failure := citationRecoveryFailure("messages.99.content.1.citations.0: Invalid `encrypted_index` in `text` block")
++	ctx := WithClaudeSearchRecovery(context.Background(), failure, body)
++	shifted, err := sjson.SetRawBytes(body, "messages", []byte(`[ {"role":"user","content":"new prefix"},`+gjson.GetBytes(body, "messages").Raw[1:]))
++	if err != nil {
++		t.Fatal(err)
++	}
++	replayed := ApplyClaudeSearchRecovery(ctx, shifted)
++	if strings.Contains(string(replayed), "opaque-one") || strings.Contains(string(replayed), "opaque-two") {
++		t.Fatal("rebuilt request did not recover orphaned citations")
++	}
++	if gjson.GetBytes(replayed, "messages.3").Raw != gjson.GetBytes(shifted, "messages.3").Raw {
++		t.Fatal("rebuilt request changed complete native search turn")
++	}
++}
++
++func TestOrphanedClaudeSearchDuplicateIdentityAndRepeatedFailureAreSafe(t *testing.T) {
++	base := []byte(orphanedRecoveryFixture)
++	// Duplicate the first orphan turn so its hashed citation identity is
++	// ambiguous during request rebuild.
++	message := gjson.GetBytes(base, "messages.0").Raw
++	duplicate, err := sjson.SetRawBytes(base, "messages", []byte(`[ `+message+`,`+gjson.GetBytes(base, "messages").Raw[1:]))
++	if err != nil {
++		t.Fatal(err)
++	}
++	failure := citationRecoveryFailure("messages.99.content.1.citations.0: Invalid `encrypted_index` in `text` block")
++	ctx := WithClaudeSearchRecovery(context.Background(), failure, duplicate)
++	if got := ApplyClaudeSearchRecovery(ctx, duplicate); !bytes.Equal(got, duplicate) {
++		t.Fatal("recovered ambiguous duplicate artifact identity")
++	}
++	if !CanRecoverClaudeSearch(context.Background(), failure) {
++		t.Fatal("expected first rejection to be eligible")
++	}
++	repeated := WithClaudeSearchRecovery(ctx, failure, duplicate)
++	if CanRecoverClaudeSearch(repeated, failure) {
++		t.Fatal("repeated identical rejection authorized another retry")
++	}
++}
 diff --git a/internal/runtime/executor/helps/claude_search_recovery.go b/internal/runtime/executor/helps/claude_search_recovery.go
 new file mode 100644
-index 00000000..6fec5acd
+index 00000000..915091b7
 --- /dev/null
 +++ b/internal/runtime/executor/helps/claude_search_recovery.go
-@@ -0,0 +1,342 @@
+@@ -0,0 +1,422 @@
 +package helps
 +
 +import (
@@ -954,16 +1095,32 @@ index 00000000..6fec5acd
 +	return false
 +}
 +
-+func rejectedClaudeSearchMessage(body, failure []byte) (int, bool) {
++// An orphaned citation has no encrypted native result in the same assistant
++// turn. A Responses client can retain the citation after losing those results.
++func claudeSearchMessageHasOrphanedCitations(message gjson.Result) bool {
++	if message.Get("role").String() != "assistant" {
++		return false
++	}
++	hasCitation := false
++	for _, block := range message.Get("content").Array() {
++		if claudeSearchBlockHasEncryptedResult(block) {
++			return false
++		}
++		hasCitation = hasCitation || claudeSearchBlockHasCitation(block)
++	}
++	return hasCitation
++}
++
++func rejectedClaudeSearchMessages(body, failure []byte) []int {
 +	r, ok := parseClaudeSearchRejection(failure)
 +	if !ok || !gjson.ValidBytes(body) {
-+		return 0, false
++		return nil
 +	}
 +	messages := gjson.GetBytes(body, "messages").Array()
 +	if r.message >= 0 && r.message < len(messages) {
 +		message := messages[r.message]
 +		if r.matches(message) {
-+			return r.message, true
++			return []int{r.message}
 +		}
 +		// An unrelated assistant with ordinary tool calls is just as possible as
 +		// an unrelated user at a normalized index. Stop only when this message
@@ -971,39 +1128,65 @@ index 00000000..6fec5acd
 +		if message.Get("role").String() == "assistant" {
 +			for _, block := range message.Get("content").Array() {
 +				if claudeSearchBlockHasEncryptedResult(block) || claudeSearchBlockHasCitation(block) {
-+					return 0, false
++					return nil
 +				}
 +				if block.Get("type").String() == "text" {
 +					text := block.Get("text").String()
 +					if strings.HasPrefix(text, claudeSearchUnavailablePrefix) || strings.Contains(text, claudeSearchCitationNotice) {
-+						return 0, false
++						return nil
 +					}
 +				}
 +			}
 +		}
 +	}
-+	// Some upstream normalization renumbers messages. Recover only a unique
-+	// matching block shape; an ambiguous wire index must never select another turn.
-+	matched := -1
++	// If the error index was renumbered, a later complete search can have the same
++	// block layout as the rejected old search. Do not guess between those turns.
++	// After an indexed citation rejection, recover the incomplete citation history
++	// together, retaining complete native searches unchanged. Stable identities
++	// must still locate every selected turn uniquely before anything is rewritten.
++	var matches, orphaned []int
++	orphanMatches := false
 +	for i, message := range messages {
++		orphan := claudeSearchMessageHasOrphanedCitations(message)
++		if orphan {
++			orphaned = append(orphaned, i)
++		}
 +		if r.matches(message) {
-+			if matched >= 0 {
-+				return 0, false
-+			}
-+			matched = i
++			matches = append(matches, i)
++			orphanMatches = orphanMatches || orphan
 +		}
 +	}
-+	return matched, matched >= 0
++	if r.citation && orphanMatches {
++		return orphaned
++	}
++	if len(matches) == 1 {
++		return matches
++	}
++	return nil
 +}
 +
-+// RecoverClaudeSearchHistory replaces only the rejected assistant turn's native
-+// search artifacts. Other turns may belong to the current account and remain valid.
++// RecoverClaudeSearchHistory recovers the identified rejected search turn. If a
++// citation error's index cannot be used, it can recover orphaned citation history
++// as a batch while preserving complete native searches and ordinary history.
 +func RecoverClaudeSearchHistory(body, failure []byte) ([]byte, bool) {
-+	index, ok := rejectedClaudeSearchMessage(body, failure)
-+	if !ok {
++	turns := claudeSearchRecoveryTurns(body, failure)
++	indexes := locateClaudeSearchRecoveryTurns(body, turns)
++	if len(indexes) == 0 {
 +		return body, false
 +	}
-+	return recoverClaudeSearchMessage(body, index)
++	return recoverClaudeSearchMessages(body, indexes)
++}
++
++func recoverClaudeSearchMessages(body []byte, indexes []int) ([]byte, bool) {
++	recovered := body
++	for _, index := range indexes {
++		var changed bool
++		recovered, changed = recoverClaudeSearchMessage(recovered, index)
++		if !changed {
++			return body, false
++		}
++	}
++	return recovered, len(indexes) > 0
 +}
 +
 +func recoverClaudeSearchMessage(body []byte, index int) ([]byte, bool) {
@@ -1086,8 +1269,11 @@ index 00000000..6fec5acd
 +}
 +
 +type claudeSearchRecoveryKey struct{}
++type claudeSearchTurnRecovery struct {
++	artifactKeys map[string]bool
++}
 +type claudeSearchRecovery struct {
-+	artifactKeys   map[string]bool
++	turns          []claudeSearchTurnRecovery
 +	failureMessage string
 +}
 +
@@ -1117,8 +1303,8 @@ index 00000000..6fec5acd
 +	return keys
 +}
 +
-+// Each rejected assistant turn gets one fresh executor attempt. Bound total
-+// attempts even when the upstream rejects multiple old turns after failover.
++// Each recovery gets one fresh executor attempt. Bound attempts even when a
++// request requires more than one recovery after credential failover.
 +func CanRecoverClaudeSearch(ctx context.Context, failure []byte) bool {
 +	failures := claudeSearchFailures(ctx)
 +	if len(failures) >= 3 {
@@ -1136,9 +1322,9 @@ index 00000000..6fec5acd
 +}
 +func WithClaudeSearchRecovery(ctx context.Context, failure, rejectedBody []byte) context.Context {
 +	failures := append([]claudeSearchRecovery(nil), claudeSearchFailures(ctx)...)
-+	recovery := claudeSearchRecovery{failureMessage: gjson.GetBytes(failure, "error.message").String()}
-+	if index, ok := rejectedClaudeSearchMessage(rejectedBody, failure); ok {
-+		recovery.artifactKeys = claudeSearchArtifactKeys(gjson.GetBytes(rejectedBody, fmt.Sprintf("messages.%d", index)))
++	recovery := claudeSearchRecovery{
++		failureMessage: gjson.GetBytes(failure, "error.message").String(),
++		turns:          claudeSearchRecoveryTurns(rejectedBody, failure),
 +	}
 +	return context.WithValue(ctx, claudeSearchRecoveryKey{}, append(failures, recovery))
 +}
@@ -1149,32 +1335,67 @@ index 00000000..6fec5acd
 +func ApplyClaudeSearchRecovery(ctx context.Context, body []byte) []byte {
 +	for _, recovery := range claudeSearchFailures(ctx) {
 +		// Rebuilds can change message positions and tool aliases. Locate the
-+		// same artifact uniquely instead of applying the old numeric wire index.
++		// same artifacts uniquely instead of applying the old numeric wire index.
++		indexes := locateClaudeSearchRecoveryTurns(body, recovery.turns)
++		if len(indexes) > 0 {
++			body, _ = recoverClaudeSearchMessages(body, indexes)
++		}
++	}
++	return body
++}
++
++func claudeSearchRecoveryTurns(body, failure []byte) []claudeSearchTurnRecovery {
++	var turns []claudeSearchTurnRecovery
++	for _, index := range rejectedClaudeSearchMessages(body, failure) {
++		turns = append(turns, claudeSearchTurnRecovery{
++			artifactKeys: claudeSearchArtifactKeys(gjson.GetBytes(body, fmt.Sprintf("messages.%d", index))),
++		})
++	}
++	return turns
++}
++
++// Validate the whole batch before modifying it. Shared or missing identities
++// must not redirect recovery to another assistant turn during a rebuild.
++func locateClaudeSearchRecoveryTurns(body []byte, turns []claudeSearchTurnRecovery) []int {
++	if len(turns) == 0 {
++		return nil
++	}
++	messages := gjson.GetBytes(body, "messages").Array()
++	keysByMessage := make([]map[string]bool, len(messages))
++	for index, message := range messages {
++		if message.Get("role").String() == "assistant" {
++			keysByMessage[index] = claudeSearchArtifactKeys(message)
++		}
++	}
++	indexes := make([]int, 0, len(turns))
++	seen := make(map[int]bool, len(turns))
++	for _, turn := range turns {
++		if len(turn.artifactKeys) == 0 {
++			return nil
++		}
 +		matchedIndex := -1
-+		for index, message := range gjson.GetBytes(body, "messages").Array() {
-+			if message.Get("role").String() != "assistant" {
-+				continue
-+			}
++		for index, keys := range keysByMessage {
 +			matched := false
-+			for key := range claudeSearchArtifactKeys(message) {
-+				if recovery.artifactKeys[key] {
++			for key := range keys {
++				if turn.artifactKeys[key] {
 +					matched = true
 +					break
 +				}
 +			}
 +			if matched {
 +				if matchedIndex >= 0 {
-+					matchedIndex = -1
-+					break
++					return nil
 +				}
 +				matchedIndex = index
 +			}
 +		}
-+		if matchedIndex >= 0 {
-+			body, _ = recoverClaudeSearchMessage(body, matchedIndex)
++		if matchedIndex < 0 || seen[matchedIndex] {
++			return nil
 +		}
++		indexes = append(indexes, matchedIndex)
++		seen[matchedIndex] = true
 +	}
-+	return body
++	return indexes
 +}
 diff --git a/internal/runtime/executor/helps/claude_search_recovery_test.go b/internal/runtime/executor/helps/claude_search_recovery_test.go
 new file mode 100644
