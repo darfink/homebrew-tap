@@ -30,7 +30,7 @@ The restart command runs only after a successful upgrade.
 If the patch changes without a new commit on `main`, force a rebuild:
 
 ```sh
-brew reinstall --HEAD darfink/tap/cliproxyapi && brew services restart darfink/tap/cliproxyapi
+brew reinstall darfink/tap/cliproxyapi && brew services restart darfink/tap/cliproxyapi
 ```
 
 ## Recovery patch
