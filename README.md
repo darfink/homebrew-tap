@@ -7,6 +7,7 @@ The patch recovers rejected Claude web-search history after an account change.
 
 ```sh
 brew tap darfink/tap
+brew trust --formula darfink/tap/cliproxyapi
 brew install --HEAD darfink/tap/cliproxyapi
 brew services start darfink/tap/cliproxyapi
 ```
