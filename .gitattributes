@@ -1,0 +1,2 @@
+# Unified diff context includes a leading space before Go indentation.
+*.patch -whitespace
