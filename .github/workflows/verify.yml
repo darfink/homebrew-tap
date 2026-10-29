@@ -1,0 +1,68 @@
+name: Verify Claude search recovery patch
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    steps:
+      - name: Check out tap
+        uses: actions/checkout@v4
+
+      - name: Check out CLIProxyAPI
+        uses: actions/checkout@v4
+        with:
+          repository: router-for-me/CLIProxyAPI
+          ref: main
+          path: source
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: source/go.sum
+
+      - name: Check and apply patch
+        working-directory: source
+        run: |
+          git apply --check ../Patches/claude-search-recovery.patch
+          git apply ../Patches/claude-search-recovery.patch
+
+      - name: Download Go modules
+        working-directory: source
+        env:
+          CGO_ENABLED: "1"
+        run: go mod download
+
+      - name: Run Claude executor tests
+        working-directory: source
+        env:
+          CGO_ENABLED: "1"
+          GOPROXY: "off"
+        run: go test -tags debug ./internal/runtime/executor ./internal/runtime/executor/helps -run Claude -count=1
+
+      - name: Run go vet
+        working-directory: source
+        env:
+          CGO_ENABLED: "1"
+          GOPROXY: "off"
+        run: go vet -tags debug ./...
+
+      - name: Build server
+        working-directory: source
+        env:
+          CGO_ENABLED: "1"
+          GOPROXY: "off"
+        run: go build -tags debug -o "${RUNNER_TEMP}/cliproxyapi-server" ./cmd/server
