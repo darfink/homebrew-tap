@@ -4,7 +4,7 @@ class Cliproxyapi < Formula
   desc "CLIProxyAPI main with Claude encrypted-search replay recovery"
   homepage "https://github.com/router-for-me/CLIProxyAPI"
   license "MIT"
-  revision 1
+  revision 2
 
   head do
     url "https://github.com/router-for-me/CLIProxyAPI.git", branch: "main"

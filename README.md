@@ -35,17 +35,19 @@ brew reinstall darfink/tap/cliproxyapi && brew services restart darfink/tap/clip
 
 ## Recovery patch
 
-The patch handles specific HTTP 400 errors for rejected encrypted search results and citation indexes.
-It retries before output starts, with the same credential, and permits at most three recoveries per request.
-An exact error location identifies the search turn to recover.
-If the error index differs from the submitted history, recovery converts incomplete citation history into readable references together.
-Complete native searches remain unchanged during this fallback.
+The patch handles the three documented HTTP 400 errors for rejected encrypted search results and citation indexes.
+It retries once before output starts, with the same credential.
+The retry converts all assistant hosted-search calls, results, and citations into readable historical references.
+It does not depend on error coordinates, block layouts, matching identifiers, or search results beside their citations.
+Ordinary answers, images, thinking, function calls, function results, document citations, and cache controls remain intact.
+The fallback also converts complete prior searches because the proxy cannot decrypt their opaque fields to determine which are invalid.
+Encrypted page contents cannot be reconstructed; Claude can search again.
+New searches remain enabled, and identical history produces identical reference text.
 Successful requests and saved transcripts remain unchanged.
 
 Related work: [CLIProxyAPI PR #6447](https://github.com/router-for-me/CLIProxyAPI/pull/6447).
-The fallback uses unique artifact identities and refuses ambiguous identities during request rebuilds.
-The tests cover streaming, non-streaming, payload rules, request signatures, ambiguous history, and repeated errors.
-They also cover a newer complete search with the same block layout as an older incomplete search.
+The tests cover streaming, non-streaming, payload rules, request signatures, split search and citation turns, and repeated errors.
+They also cover duplicate identifiers, inaccurate error coordinates, and newer searches with repeated block layouts.
 
 The formula builds with the `debug` tag and CGO for native plugins.
 The version includes a fingerprint of the recovery patch.
