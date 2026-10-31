@@ -1,7 +1,9 @@
 # Personal Homebrew tap
 
-This tap builds CLIProxyAPI from its official `main` branch with one temporary compatibility patch.
-The patch recovers rejected Claude web-search history after an account change.
+This tap builds CLIProxyAPI from its official `main` branch with two temporary compatibility patches.
+The Claude search recovery patch restores rejected web-search history after an account change.
+The auth-file validation patch ignores JSON without a nonempty string `type` field, unless a plugin recognizes the file.
+It preserves custom provider IDs.
 
 ## Install
 
@@ -23,7 +25,7 @@ brew update
 brew upgrade --fetch-HEAD darfink/tap/cliproxyapi && brew services restart darfink/tap/cliproxyapi
 ```
 
-Each build downloads the latest `main`, applies the patch, and runs the Claude regression tests.
+Each build downloads the latest `main`, applies both patches, and runs the Claude regression tests and auth-loader tests.
 A patch or test error stops the installation.
 The restart command runs only after a successful upgrade.
 
@@ -50,10 +52,16 @@ The tests cover streaming, non-streaming, payload rules, request signatures, spl
 They also cover duplicate identifiers, inaccurate error coordinates, and newer searches with repeated block layouts.
 
 The formula builds with the `debug` tag and CGO for native plugins.
-The version includes a fingerprint of the recovery patch.
+The version includes a fingerprint of both patches.
 The regression tests use mock HTTP servers and require no provider credentials.
 The optional captured-log test skips without `CLIPROXY_SEARCH_REPLAY_LOG`.
 This repository contains no captured conversations or credentials.
 
 Once the official implementation covers these cases, remove the patch or return to the core formula.
 The patch can require changes after incompatible edits on `main`.
+
+## Credential backups
+
+Store auth-file backups in `~/Library/Application Support/CLIProxyAPI/backups`.
+Do not store backups under the configured `auth-dir`.
+The auth directory is scanned recursively. Backup credentials can become live accounts, so keep all maintenance files elsewhere.

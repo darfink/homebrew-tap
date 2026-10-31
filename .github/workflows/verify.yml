@@ -39,6 +39,8 @@ jobs:
         run: |
           git apply --check ../Patches/claude-search-recovery.patch
           git apply ../Patches/claude-search-recovery.patch
+          git apply --check ../Patches/auth-file-validation.patch
+          git apply ../Patches/auth-file-validation.patch
 
       - name: Download Go modules
         working-directory: source
@@ -52,6 +54,13 @@ jobs:
           CGO_ENABLED: "1"
           GOPROXY: "off"
         run: go test -tags debug ./internal/runtime/executor ./internal/runtime/executor/helps -run Claude -count=1
+
+      - name: Run credential loader tests
+        working-directory: source
+        env:
+          CGO_ENABLED: "1"
+          GOPROXY: "off"
+        run: go test -tags debug ./sdk/auth ./internal/watcher/synthesizer -count=1
 
       - name: Run go vet
         working-directory: source

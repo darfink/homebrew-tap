@@ -1,0 +1,105 @@
+diff --git a/sdk/auth/filestore.go b/sdk/auth/filestore.go
+index f8e06153..c8fbdddb 100644
+--- a/sdk/auth/filestore.go
++++ b/sdk/auth/filestore.go
+@@ -315,8 +315,11 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
+ 			return auths, nil
+ 		}
+ 	}
++	// A plugin may recognize a provider-less format above, but arbitrary JSON
++	// reports and backup manifests are not credentials. Match the watcher,
++	// which also ignores files without a declared provider.
+ 	if provider == "" {
+-		provider = "unknown"
++		return nil, nil
+ 	}
+ 	info, errStat = os.Stat(path)
+ 	if errStat != nil {
+diff --git a/sdk/auth/filestore_metadata_test.go b/sdk/auth/filestore_metadata_test.go
+new file mode 100644
+--- /dev/null
++++ b/sdk/auth/filestore_metadata_test.go
+@@ -0,0 +1,83 @@
++package auth
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"sort"
++	"testing"
++
++	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++func TestFileTokenStoreListSkipsJSONWithoutUsableProviderType(t *testing.T) {
++	baseDir := t.TempDir()
++	files := map[string][]byte{
++		"backups/verified/verification.json": []byte(`{"verified":true,"commit":"example"}`),
++		"migration/legacy.json":              []byte(`{"refresh_token":"migration-token"}`),
++		"missing.json":                       []byte(`{"access_token":"missing-token"}`),
++		"null.json":                          []byte(`{"type":null,"access_token":"null-token"}`),
++		"number.json":                        []byte(`{"type":42,"access_token":"number-token"}`),
++		"blank.json":                         []byte(`{"type":"  ","access_token":"blank-token"}`),
++		"claude.json":                        []byte(`{"type":"claude","email":"claude@example.com"}`),
++		"codex.json":                         []byte(`{"type":"codex","email":"codex@example.com"}`),
++		"accounts/custom.json":               []byte(`{"type":"custom-provider","email":"custom@example.com"}`),
++		"plugin-managed.json":                []byte(`{"access_token":"plugin-token"}`),
++	}
++	for name, contents := range files {
++		path := filepath.Join(baseDir, name)
++		if errMkdir := os.MkdirAll(filepath.Dir(path), 0o755); errMkdir != nil {
++			t.Fatalf("create directory for %s: %v", name, errMkdir)
++		}
++		if errWrite := os.WriteFile(path, contents, 0o600); errWrite != nil {
++			t.Fatalf("write %s: %v", name, errWrite)
++		}
++	}
++
++	parserSawProviderless := false
++	RegisterPluginAuthParser(fileStoreMultiAuthParserFunc(func(_ context.Context, req pluginapi.AuthParseRequest) ([]*cliproxyauth.Auth, bool, error) {
++		if req.FileName == "plugin-managed.json" {
++			parserSawProviderless = req.Provider == ""
++			return []*cliproxyauth.Auth{{ID: req.FileName, Provider: "plugin-provider"}}, true, nil
++		}
++		return nil, false, nil
++	}))
++	t.Cleanup(func() { RegisterPluginAuthParser(nil) })
++
++	store := NewFileTokenStore()
++	store.SetBaseDir(baseDir)
++	auths, errList := store.List(context.Background())
++	if errList != nil {
++		t.Fatalf("List() error = %v", errList)
++	}
++	if !parserSawProviderless {
++		t.Fatal("plugin parser did not receive provider-less JSON before built-in handling")
++	}
++
++	gotProviders := make([]string, 0, len(auths))
++	for _, auth := range auths {
++		gotProviders = append(gotProviders, auth.Provider)
++	}
++	sort.Strings(gotProviders)
++	wantProviders := []string{"claude", "codex", "custom-provider", "plugin-provider"}
++	if len(gotProviders) != len(wantProviders) {
++		t.Fatalf("List() providers = %v, want %v", gotProviders, wantProviders)
++	}
++	for i := range wantProviders {
++		if gotProviders[i] != wantProviders[i] {
++			t.Fatalf("List() providers = %v, want %v", gotProviders, wantProviders)
++		}
++	}
++
++	for name, wantContents := range files {
++		path := filepath.Join(baseDir, name)
++		gotContents, errRead := os.ReadFile(path)
++		if errRead != nil {
++			t.Fatalf("read %s after List(): %v", name, errRead)
++		}
++		if string(gotContents) != string(wantContents) {
++			t.Errorf("List() changed %s: got %s, want %s", name, gotContents, wantContents)
++		}
++	}
++}

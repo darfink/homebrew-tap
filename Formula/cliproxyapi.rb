@@ -4,13 +4,17 @@ class Cliproxyapi < Formula
   desc "CLIProxyAPI main with Claude encrypted-search replay recovery"
   homepage "https://github.com/router-for-me/CLIProxyAPI"
   license "MIT"
-  revision 2
+  revision 3
 
   head do
     url "https://github.com/router-for-me/CLIProxyAPI.git", branch: "main"
 
     patch do
       file "Patches/claude-search-recovery.patch"
+    end
+
+    patch do
+      file "Patches/auth-file-validation.patch"
     end
   end
 
@@ -28,6 +32,7 @@ class Cliproxyapi < Formula
     # HTTP tests here, on the patched source, before the new keg can be installed.
     system "go", "test", "-tags", "debug", "./internal/runtime/executor",
            "./internal/runtime/executor/helps", "-run", "Claude", "-count=1"
+    system "go", "test", "-tags", "debug", "./sdk/auth", "./internal/watcher/synthesizer", "-count=1"
   end
 
   def install
@@ -35,7 +40,7 @@ class Cliproxyapi < Formula
     ENV["GOPROXY"] = "off"
     ENV["GOSUMDB"] = "off"
 
-    patch_sha = Digest::SHA256.hexdigest(head.patches.first.contents)[0, 12]
+    patch_sha = Digest::SHA256.hexdigest(head.patches.map(&:contents).join)[0, 12]
     ldflags = %W[
       -X main.Version=#{pkg_version}-search-recovery.#{patch_sha}
       -X main.Commit=#{version.commit}
